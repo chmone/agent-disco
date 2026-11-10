@@ -1,6 +1,6 @@
 {
   "name": "agent-disco",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Background agents in a sidebar with progress bars and dancing Claudes; the main chat's Claude points at the agent it is working on, or dances off to the side on a new thought.",
   "types": "./types/index.d.ts",
   "license": "MIT"

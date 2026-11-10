@@ -11,9 +11,12 @@ import type { AgentRow, ParentFocus } from '../types'
 const PANE = 'agent-disco'
 const TITLE = 'Agent disco'
 const INLINE = 'agent-disco-floor'
+// How long a finished agent stays on the floor before it leaves.
+const DONE_LINGER_MS = 2 * 60_000
+const FAILED_LINGER_MS = 5 * 60_000
 
 const agents = atom({ plugin: 'agent-disco', key: 'agents' } as const, [], {
-  shape: 'agents-2',
+  shape: 'agents-3',
 })
 const frame = atom({ plugin: 'agent-disco', key: 'frame' } as const, 0)
 const IDLE: ParentFocus = { mode: 'idle', target: '', why: '' }
@@ -46,13 +49,39 @@ const dancer = (row: AgentRow, f: number, i: number): string => {
 
 // --- progress --------------------------------------------------------------
 
-// An agent never says how far along it is, so the bar is an estimate from the
-// work it has done (model steps and tool calls): it climbs fast, then slows,
-// and never passes 95% until the agent actually finishes.
-const progress = (row: AgentRow): number => {
+// An agent never says how far along it is, so the bar is an estimate:
+// - if it keeps a todo list (TodoWrite / TaskCreate+TaskUpdate), the share of
+//   items it has finished;
+// - otherwise its elapsed time and tool calls against how long agents of
+//   its type have actually taken before (learned, kept across sessions),
+//   so a long tail after a quick run-through does not sit at 95%.
+// It never shows 100% until the agent really ends.
+type Run = { type: string; ms: number; tools: number }
+const DEFAULT_MS = 10 * 60_000
+const DEFAULT_TOOLS = 40
+let history: Run[] = []
+
+const median = (xs: number[]): number => {
+  const v = xs.slice().sort((a, b) => a - b)
+  return v[Math.floor(v.length / 2)] ?? 0
+}
+
+const expected = (type: string): { ms: number; tools: number } => {
+  const same = history.filter(r => r.type === type)
+  const pool = same.length >= 3 ? same : history
+  if (pool.length < 3) return { ms: DEFAULT_MS, tools: DEFAULT_TOOLS }
+  return { ms: Math.max(60_000, median(pool.map(r => r.ms))), tools: Math.max(5, median(pool.map(r => r.tools))) }
+}
+
+const progress = (row: AgentRow, now: number): number => {
   if (row.status !== 'running') return 1
-  const work = row.steps + row.tools * 0.5
-  return Math.min(0.95, 1 - Math.exp(-work / 14))
+  if (row.todoTotal > 0) {
+    return Math.min(0.97, Math.max(0.03, (row.todoDone + 0.3) / row.todoTotal))
+  }
+  const exp = expected(row.type)
+  const r = 0.65 * ((now - row.startedAt) / exp.ms) + 0.35 * (row.tools / exp.tools)
+  // r = 1 (a typical run's length) reads 70%; twice that, 91%.
+  return Math.min(0.97, 1 - Math.exp(-1.2 * r))
 }
 
 const bar = (p: number, width: number): string => {
@@ -91,14 +120,6 @@ function patch($: EngineInterface, id: string, fn: (a: AgentRow) => AgentRow) {
   return update($, agents, list => list.map(a => (a.id === id ? fn(a) : a)))
 }
 
-// One line for the status bar: a dancer and each running agent's percent.
-function statusLine(list: readonly AgentRow[], beat: number): string {
-  const running = list.filter(a => a.status === 'running')
-  const me = DANCE[beat % DANCE.length] ?? DANCE[0]!
-  const parts = running.slice(-4).map(a => `${short(a.label, 18)} ${Math.round(progress(a) * 100)}%`)
-  return `${me} ${running.length} dancing · ${parts.join(' · ')}`
-}
-
 // What the pane (and its inline stand-in) draws: one row per agent.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function floorTree($: EngineInterface, Box: any, Text: any, cols: number) {
@@ -128,7 +149,7 @@ async function floorTree($: EngineInterface, Box: any, Text: any, cols: number) 
           .slice()
           .reverse()
           .map((a, i) => {
-            const p = progress(a)
+            const p = progress(a, now)
             const watched = fx.mode === 'pointing' && fx.target === a.id
             const tone = a.status === 'failed' ? 'error' : a.status === 'done' ? 'success' : 'claude'
             return (
@@ -150,6 +171,7 @@ async function floorTree($: EngineInterface, Box: any, Text: any, cols: number) 
                 <Text dimColor>
                   {a.type}
                   {a.background ? ' · bg' : ''} · {elapsed(a, now)} · {a.tools} tools
+                  {a.todoTotal > 0 ? ` · ${a.todoDone}/${a.todoTotal} todos` : ''}
                   {a.status === 'running' ? ` · ${a.lastTool}` : ''}
                 </Text>
               </Box>
@@ -176,6 +198,8 @@ async function seed($: EngineInterface) {
         background: true,
         status: 'running',
         steps: 0,
+        todoTotal: 0,
+        todoDone: 0,
         tools: 0,
         lastTool: 'already running',
         startedAt: now,
@@ -201,9 +225,8 @@ async function show($: EngineInterface): Promise<string> {
 export const register: Register = on => {
   let tick: { cancel: () => void } | undefined
   let beats = 0
-  let hasStatus = false
-  // When the band above the prompt last drew (the terminal and desktop draw it).
-  let bandAt = 0
+  // TaskCreate/TaskUpdate lists, per agent: task id -> done.
+  const tasks = new Map<string, Map<string, boolean>>()
   // Spawns whose agentId has not come back yet, by Agent tool call.
   const pending = new Map<string, { label: string; type: string; background: boolean }>()
 
@@ -219,6 +242,10 @@ export const register: Register = on => {
     })
     void $.ui.open({ id: PANE, title: TITLE })
     void seed($)
+    // An earlier version wrote a status line; clear whatever it left.
+    $.ui.status(undefined)
+    const kept = await $.store.get('history')
+    history = Array.isArray(kept) ? (kept as Run[]).filter(r => r && typeof r.ms === 'number').slice(-60) : []
 
     tick?.cancel()
     tick = $.clock.every(260, () => {
@@ -229,18 +256,13 @@ export const register: Register = on => {
         const running = list.some(a => a.status === 'running')
         // Only advance the beat (and so redraw) when someone is dancing.
         if (running || f.mode !== 'idle') await update($, frame, n => (n + 1) % 1200)
-        // The status line, which every client shows: about once a second.
-        if (beats % 4 === 0) {
-          // Only where nothing richer is on screen: the terminal draws the
-          // band above the prompt and the pane, so a status line would repeat them.
-          const shown = (await $.clock.now()) - bandAt < 3000 || (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)
-          if (running && !shown) {
-            hasStatus = true
-            $.ui.status(statusLine(list, beats / 4))
-          } else if (hasStatus) {
-            hasStatus = false
-            $.ui.status(undefined)
-          }
+        // Finished agents leave the floor after a while.
+        if (beats % 4 === 0 && list.some(a => a.status !== 'running')) {
+          const now = await $.clock.now()
+          const gone = (a: AgentRow) =>
+            (a.status === 'done' && now - a.endedAt > DONE_LINGER_MS) ||
+            (a.status === 'failed' && now - a.endedAt > FAILED_LINGER_MS)
+          if (list.some(gone)) await update($, agents, rows => rows.filter(a => !gone(a)))
         }
         // Every ~2.6s reconcile with the engine's own roster, so an agent that
         // was killed or failed without a final turn still stops dancing.
@@ -306,6 +328,8 @@ export const register: Register = on => {
       background: e.background,
       status: 'running',
       steps: 0,
+      todoTotal: 0,
+      todoDone: 0,
       tools: 0,
       lastTool: 'warming up',
       startedAt: now,
@@ -341,7 +365,26 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     if (e.agentId !== undefined) {
       const id = e.agentId
-      await patch($, id, a => ({ ...a, tools: a.tools + 1, lastTool: e.tool }))
+      const args = e as unknown as Record<string, unknown>
+      let todo: { total: number; done: number } | undefined
+      if (e.tool === 'TodoWrite' && Array.isArray(args.todos)) {
+        const items = args.todos as { status?: string }[]
+        todo = { total: items.length, done: items.filter(t => t?.status === 'completed').length }
+      } else if (e.tool === 'TaskCreate' || e.tool === 'TaskUpdate') {
+        const mine = tasks.get(id) ?? new Map<string, boolean>()
+        tasks.set(id, mine)
+        const key = String(args.taskId ?? args.task_id ?? args.id ?? `new-${mine.size}`)
+        if (e.tool === 'TaskCreate') mine.set(key, false)
+        else if (args.status === 'completed') mine.set(key, true)
+        else if (args.status === 'deleted') mine.delete(key)
+        todo = { total: mine.size, done: [...mine.values()].filter(Boolean).length }
+      }
+      await patch($, id, a => ({
+        ...a,
+        tools: a.tools + 1,
+        lastTool: e.tool,
+        ...(todo ? { todoTotal: todo.total, todoDone: todo.done } : {}),
+      }))
       return next(e)
     }
 
@@ -377,10 +420,14 @@ export const register: Register = on => {
       const id = e.agentId
       const now = await $.clock.now()
       const ok = e.reason === 'answer'
-      await patch($, id, (a): AgentRow => ({ ...a, status: ok ? 'done' : 'failed', endedAt: now, lastTool: ok ? 'finished' : e.reason }))
-      const list = await read($, agents)
-      const row = list.find(a => a.id === id)
-      if (row?.background) $.ui.toast(`${ok ? '✓' : '✗'} ${short(row.label, 40)} ${ok ? 'is done' : e.reason}`)
+      await patch($, id, (a): AgentRow => ({ ...a, status: ok ? 'done' : 'failed', endedAt: now, lastTool: ok ? (a.lastTool === 'already running' ? a.lastTool : 'finished') : e.reason }))
+      tasks.delete(id)
+      // Learn how long agents of this type really take, for the next bars.
+      const row = (await read($, agents)).find(a => a.id === id)
+      if (ok && row && row.lastTool !== 'already running' && row.startedAt > 0) {
+        history = [...history, { type: row.type, ms: now - row.startedAt, tools: row.tools }].slice(-60)
+        await $.store.set('history', history)
+      }
     } else {
       await update($, focus, () => IDLE)
     }
@@ -411,7 +458,7 @@ export const register: Register = on => {
     if (!a) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const f = await read($, frame)
-    const p = progress(a)
+    const p = progress(a, await $.clock.now())
     const tone = a.status === 'failed' ? 'error' : a.status === 'done' ? 'success' : 'claude'
     const row = await next(e)
     return (
@@ -437,44 +484,32 @@ export const register: Register = on => {
     const running = list.filter(a => a.status === 'running')
     if (running.length === 0 && fx.mode !== 'pointing') return next(e)
 
-    bandAt = await $.clock.now()
     const { Box, Text } = $.ui.resolve(e)
     const f = await read($, frame)
+    const now = await $.clock.now()
     const target = fx.mode === 'pointing' ? list.find(a => a.id === fx.target) : undefined
     // Chips: one per agent on the floor; the one main is looking at is lit.
-    const floor = list.filter(a => a.status === 'running' || a.id === fx.target).slice(-6)
+    const floor = list.filter(a => a.status === 'running' || a.id === fx.target).slice(-5)
 
-    let me: string
-    let say: string
-    if (target) {
-      const reach = '─'.repeat(1 + (f % 3))
-      me = `${POINT[f % POINT.length]}${reach}▶`
-      say = `on “${short(target.label, 28)}”${fx.why ? ` (${fx.why})` : ''}`
-    } else if (fx.mode === 'side') {
-      me = `${' '.repeat(2 + (f % 4))}${NOTES[f % NOTES.length]}${DANCE[f % DANCE.length]}`
-      say = 'off to the side, thinking about something new'
-    } else {
-      me = THINK[Math.floor(f / 3) % THINK.length] ?? THINK[0]!
-      say = 'waiting on the floor'
-    }
+    // One line: the main chat's Claude, then the floor.
+    const me = target
+      ? `${POINT[f % POINT.length]}${'─'.repeat(1 + (f % 3))}▶`
+      : fx.mode === 'side'
+        ? `${NOTES[f % NOTES.length]}${DANCE[f % DANCE.length]}`
+        : (THINK[Math.floor(f / 3) % THINK.length] ?? THINK[0]!)
 
     return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" gap={1}>
-          <Text color="claude" mono>{me}</Text>
-          <Text dimColor>{say}</Text>
-        </Box>
-        <Box flexDirection="row" gap={1} flexWrap="wrap">
-          <Text dimColor>bg:</Text>
-          {floor.map((a, i) => {
-            const lit = target?.id === a.id
-            return (
-              <Text key={a.id} color={lit ? 'suggestion' : a.status === 'running' ? 'claude' : 'success'} weight={lit ? 'bold' : 'regular'} mono>
-                {lit ? '▶' : ''}[{dancer(a, f, i).trim()} {short(a.label, 16)} {Math.round(progress(a) * 100)}%]
-              </Text>
-            )
-          })}
-        </Box>
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        <Text color="claude" mono>{me}</Text>
+        {fx.mode === 'side' && !target && <Text dimColor>new thought ·</Text>}
+        {floor.map((a, i) => {
+          const lit = target?.id === a.id
+          return (
+            <Text key={a.id} color={lit ? 'suggestion' : a.status === 'running' ? 'claude' : 'success'} weight={lit ? 'bold' : 'regular'} mono>
+              [{dancer(a, f, i).trim()} {short(a.label, 16)} {Math.round(progress(a, now) * 100)}%]
+            </Text>
+          )
+        })}
       </Box>
     )
   })

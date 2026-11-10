@@ -11,15 +11,21 @@ A Claude Code mod that puts every background agent on a dance floor.
   notice), its Claude points at that agent's chip. When it is thinking about something unrelated, it
   slides off to the side and dances.
 
-Progress is an estimate: agents never report how far along they are, so the bar grows with the agent's
-model steps and tool calls, slows as it climbs, caps at 95%, and fills only when the agent finishes.
+Progress is an estimate: agents never report how far along they are. When an agent keeps a todo list
+(TodoWrite, or TaskCreate/TaskUpdate), the bar is the share of items it has finished. Otherwise it compares
+the agent's elapsed time and tool calls with how long agents of the same type actually took before (learned
+across sessions; a 10-minute guess until three runs are on record). A typical-length run reads about 70%,
+twice that about 91%; the bar caps at 97% and fills only when the agent finishes.
+
+Finished agents leave the floor 2 minutes after they finish (failed ones after 5); `/agent-disco-clear`
+clears them at once.
 
 ## Where it shows up
 
 The side pane and the band above the prompt draw in the terminal CLI (and Claude Code Desktop when
 attached locally). Clients that don't draw mod panes, such as the Claude app viewing a cloud session,
 get the fallbacks instead: a live card with a dancer and progress bar under each Agent call's row in the
-chat, the status line (`♪ 3 dancing · Fix round 56% · …`, only while neither the band nor the pane is drawing), and `/agent-disco` drawing the floor
+chat and `/agent-disco` drawing the floor
 inline in the chat.
 
 ## Install

@@ -6,6 +6,8 @@ export type AgentRow = {
   background: boolean
   status: 'running' | 'done' | 'failed'
   steps: number
+  todoTotal: number
+  todoDone: number
   tools: number
   lastTool: string
   startedAt: number
