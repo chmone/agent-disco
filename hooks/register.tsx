@@ -10,6 +10,7 @@ import type { AgentRow, ParentFocus } from '../types'
 
 const PANE = 'agent-disco'
 const TITLE = 'Agent disco'
+const INLINE = 'agent-disco-floor'
 
 const agents = atom({ plugin: 'agent-disco', key: 'agents' } as const, [], {
   shape: 'agents-1',
@@ -90,6 +91,104 @@ function patch($: EngineInterface, id: string, fn: (a: AgentRow) => AgentRow) {
   return update($, agents, list => list.map(a => (a.id === id ? fn(a) : a)))
 }
 
+// What the pane (and its inline stand-in) draws: one row per agent.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function floorTree($: EngineInterface, Box: any, Text: any, cols: number) {
+    const list = await read($, agents)
+    const f = await read($, frame)
+    const fx = await read($, focus)
+    const now = await $.clock.now()
+    const barWidth = Math.max(6, Math.min(24, cols - 20))
+    const running = list.filter(a => a.status === 'running').length
+
+    if (list.length === 0) {
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          <Text color="claude" mono>{' (•ᴗ•)zZ'}</Text>
+          <Text dimColor>No agents on the floor yet.</Text>
+          <Text dimColor>They show up here as soon as one starts.</Text>
+        </Box>
+      )
+    }
+
+    return (
+      <Box flexDirection="column" paddingX={1} gap={1}>
+        <Text dimColor>
+          {running > 0 ? `${running} dancing · ${list.length - running} resting` : `${list.length} resting`}
+        </Text>
+        {list
+          .slice()
+          .reverse()
+          .map((a, i) => {
+            const p = progress(a)
+            const watched = fx.mode === 'pointing' && fx.target === a.id
+            const tone = a.status === 'failed' ? 'error' : a.status === 'done' ? 'success' : 'claude'
+            return (
+              <Box key={a.id} flexDirection="column">
+                <Box flexDirection="row" gap={1}>
+                  <Text color={tone} mono>
+                    {a.status === 'running' ? NOTES[(f + i) % NOTES.length] : '  '}
+                    {dancer(a, f, i)}
+                  </Text>
+                  <Text weight="semibold">{short(a.label, Math.max(10, cols - 14))}</Text>
+                  {watched && <Text color="suggestion">◀ main</Text>}
+                </Box>
+                <Box flexDirection="row" gap={1}>
+                  <Text color={tone} mono>{bar(p, barWidth)}</Text>
+                  <Text dimColor mono>
+                    {a.status === 'running' ? `~${Math.round(p * 100)}%` : a.status === 'done' ? 'done' : 'failed'}
+                  </Text>
+                </Box>
+                <Text dimColor>
+                  {a.type}
+                  {a.background ? ' · bg' : ''} · {elapsed(a, now)} · {a.tools} tools
+                  {a.status === 'running' ? ` · ${a.lastTool}` : ''}
+                </Text>
+              </Box>
+            )
+          })}
+      </Box>
+    )
+}
+
+// Agents already running when the mod loaded (or reloaded) never raised a
+// spawn it heard, so take them from the engine's roster.
+async function seed($: EngineInterface) {
+  const roster = await $.agent.list()
+  const now = await $.clock.now()
+  await update($, agents, list => {
+    const known = new Set(list.map(a => a.id))
+    const fresh: AgentRow[] = roster
+      .filter(r => !known.has(r.id) && (r.status === 'running' || r.status === 'pending' || r.status === 'waiting'))
+      .map(r => ({
+        id: r.id,
+        label: r.description || r.name || r.type,
+        type: r.type,
+        background: true,
+        status: 'running',
+        steps: 0,
+        tools: 0,
+        lastTool: 'already running',
+        startedAt: now,
+        endedAt: 0,
+      }))
+    return [...list, ...fresh].slice(-40)
+  })
+}
+
+// Opens the pane; where the surface does not draw it, places the inline
+// row instead and says why.
+async function show($: EngineInterface): Promise<string> {
+  await seed($)
+  const opened = await $.ui.open({ id: PANE, title: TITLE })
+  if (opened.isPlaced) return 'Agent disco is open in the side pane.'
+  const placed = await $.ui.place({ id: INLINE })
+  const why = opened.reason
+  return placed.isPlaced
+    ? `This app did not place the side pane (${why}), so the floor is drawn right here in the chat.`
+    : `Could not draw Agent disco: ${why}.`
+}
+
 export const register: Register = on => {
   let tick: { cancel: () => void } | undefined
   let beats = 0
@@ -107,6 +206,7 @@ export const register: Register = on => {
       description: 'Clear finished agents from the Agent disco pane',
     })
     void $.ui.open({ id: PANE, title: TITLE })
+    void seed($)
 
     tick?.cancel()
     tick = $.clock.every(260, () => {
@@ -146,10 +246,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'agent-disco' }, async $ => {
-    await $.ui.open({ id: PANE, title: TITLE })
-    return { text: 'Agent disco is open.' }
-  })
+  on('command.run', { command: 'agent-disco' }, async $ => ({ text: await show($) }))
 
   on('command.run', { command: 'agent-disco-clear' }, async $ => {
     await update($, agents, list => list.filter(a => a.status === 'running'))
@@ -268,62 +365,15 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const list = await read($, agents)
-    const f = await read($, frame)
-    const fx = await read($, focus)
-    const now = await $.clock.now()
-    const cols = e.viewport?.columns ?? 40
-    const barWidth = Math.max(6, Math.min(24, cols - 20))
-    const running = list.filter(a => a.status === 'running').length
+    return floorTree($, Box, Text, e.viewport?.columns ?? 40)
+  })
 
-    if (list.length === 0) {
-      return (
-        <Box flexDirection="column" paddingX={1}>
-          <Text color="claude" mono>{' (•ᴗ•)zZ'}</Text>
-          <Text dimColor>No agents on the floor yet.</Text>
-          <Text dimColor>They show up here as soon as one starts.</Text>
-        </Box>
-      )
-    }
-
-    return (
-      <Box flexDirection="column" paddingX={1} gap={1}>
-        <Text dimColor>
-          {running > 0 ? `${running} dancing · ${list.length - running} resting` : `${list.length} resting`}
-        </Text>
-        {list
-          .slice()
-          .reverse()
-          .map((a, i) => {
-            const p = progress(a)
-            const watched = fx.mode === 'pointing' && fx.target === a.id
-            const tone = a.status === 'failed' ? 'error' : a.status === 'done' ? 'success' : 'claude'
-            return (
-              <Box key={a.id} flexDirection="column">
-                <Box flexDirection="row" gap={1}>
-                  <Text color={tone} mono>
-                    {a.status === 'running' ? NOTES[(f + i) % NOTES.length] : '  '}
-                    {dancer(a, f, i)}
-                  </Text>
-                  <Text weight="semibold">{short(a.label, Math.max(10, cols - 14))}</Text>
-                  {watched && <Text color="suggestion">◀ main</Text>}
-                </Box>
-                <Box flexDirection="row" gap={1}>
-                  <Text color={tone} mono>{bar(p, barWidth)}</Text>
-                  <Text dimColor mono>
-                    {a.status === 'running' ? `~${Math.round(p * 100)}%` : a.status === 'done' ? 'done' : 'failed'}
-                  </Text>
-                </Box>
-                <Text dimColor>
-                  {a.type}
-                  {a.background ? ' · bg' : ''} · {elapsed(a, now)} · {a.tools} tools
-                  {a.status === 'running' ? ` · ${a.lastTool}` : ''}
-                </Text>
-              </Box>
-            )
-          })}
-      </Box>
-    )
+  // The same floor, drawn as a live row in the conversation, for surfaces
+  // that do not place panes (or a window too narrow for one).
+  on('ui.render', { component: 'Placed' }, async ($, e, next) => {
+    if (e.props.plugin !== 'agent-disco' || e.props.id !== INLINE) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return floorTree($, Box, Text, e.viewport?.columns ?? 60)
   })
 
   // --- the main chat's Claude, above the prompt ------------------------------

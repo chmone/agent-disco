@@ -64,3 +64,21 @@ test('the main Claude points at the agent it messages, and dances aside otherwis
   expect((await ui.find({ type: 'Text', text: /off to the side/ }))?.text).toContain('something new')
   await ui.unmount()
 })
+
+test('where no pane is placed, /agent-disco draws the floor inline and shows agents already running', async ($, on) => {
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: false, reason: 'no surface places panes' } }))
+  on('ui.place', () => ({ value: { isPlaced: true, requestId: 'r1' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('clock.now', () => ({ value: 1_000 }))
+  on('clock.every', () => ({ value: {} }))
+  on('agent.list', () => ({ value: [{ id: 'old1', description: 'Phase 4 review', type: 'general-purpose', status: 'running' }] }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const out = await $.command.run({ command: 'agent-disco', args: '' } as never)
+  expect(JSON.stringify(out)).toContain('drawn right here in the chat')
+
+  const ui = await $.ui.mount({ plugin: 'agent-disco', component: 'Placed', surface: 'desktop', props: { id: 'agent-disco-floor', plugin: 'agent-disco' } } as never)
+  expect((await ui.find({ type: 'Text', text: /Phase 4 review/ }))?.text).toContain('Phase 4 review')
+  await ui.unmount()
+})
