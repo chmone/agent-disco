@@ -14,6 +14,14 @@ A Claude Code mod that puts every background agent on a dance floor.
 Progress is an estimate: agents never report how far along they are, so the bar grows with the agent's
 model steps and tool calls, slows as it climbs, caps at 95%, and fills only when the agent finishes.
 
+## Where it shows up
+
+The side pane and the band above the prompt draw in the terminal CLI (and Claude Code Desktop when
+attached locally). Clients that don't draw mod panes, such as the Claude app viewing a cloud session,
+get the fallbacks instead: a live card with a dancer and progress bar under each Agent call's row in the
+chat, the status line (`♪ 3 dancing · Fix round 56% · …`), and `/agent-disco` drawing the floor
+inline in the chat.
+
 ## Install
 
 In a Claude Code session:

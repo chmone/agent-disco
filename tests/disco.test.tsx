@@ -82,3 +82,30 @@ test('where no pane is placed, /agent-disco draws the floor inline and shows age
   expect((await ui.find({ type: 'Text', text: /Phase 4 review/ }))?.text).toContain('Phase 4 review')
   await ui.unmount()
 })
+
+test('the Agent call row in the chat carries a live card, on the app surfaces too', async ($, on) => {
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: false, reason: 'no surface places panes' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('agent.spawn', () => ({ model: 'm', agentId: 'a9' }))
+  on('clock.now', () => ({ value: 1_000 }))
+  on('clock.every', () => ({ value: {} }))
+  on('agent.list', () => ({ value: [] }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>Agent(Fix round)</Text>
+  })
+
+  await $.session.start({ cwd: '/', surface: 'mobile', isInteractive: true })
+  await $.agent.spawn({ tool_use_id: 'tu1', prompt: 'p', description: 'Fix round', subagentType: 'general-purpose', background: true } as never)
+
+  for (const surface of ['desktop', 'mobile'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'agent-disco', component: 'ToolUse', surface,
+      props: { tool_use_id: 'tu1', tool: 'Agent', input: {}, isRunning: false, isErrored: false, isInterrupted: false },
+    } as never)
+    expect((await ui.find({ type: 'Text', text: /Agent\(Fix round\)/ }))?.text).toBe('Agent(Fix round)')
+    expect((await ui.find({ type: 'Text', text: /%/ }))?.text).toMatch(/~\d+% · 0 tools/)
+    await ui.unmount()
+  }
+})

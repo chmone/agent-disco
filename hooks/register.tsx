@@ -13,7 +13,7 @@ const TITLE = 'Agent disco'
 const INLINE = 'agent-disco-floor'
 
 const agents = atom({ plugin: 'agent-disco', key: 'agents' } as const, [], {
-  shape: 'agents-1',
+  shape: 'agents-2',
 })
 const frame = atom({ plugin: 'agent-disco', key: 'frame' } as const, 0)
 const IDLE: ParentFocus = { mode: 'idle', target: '', why: '' }
@@ -91,6 +91,14 @@ function patch($: EngineInterface, id: string, fn: (a: AgentRow) => AgentRow) {
   return update($, agents, list => list.map(a => (a.id === id ? fn(a) : a)))
 }
 
+// One line for the status bar: a dancer and each running agent's percent.
+function statusLine(list: readonly AgentRow[], beat: number): string {
+  const running = list.filter(a => a.status === 'running')
+  const me = DANCE[beat % DANCE.length] ?? DANCE[0]!
+  const parts = running.slice(-4).map(a => `${short(a.label, 18)} ${Math.round(progress(a) * 100)}%`)
+  return `${me} ${running.length} dancing · ${parts.join(' · ')}`
+}
+
 // What the pane (and its inline stand-in) draws: one row per agent.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function floorTree($: EngineInterface, Box: any, Text: any, cols: number) {
@@ -162,6 +170,7 @@ async function seed($: EngineInterface) {
       .filter(r => !known.has(r.id) && (r.status === 'running' || r.status === 'pending' || r.status === 'waiting'))
       .map(r => ({
         id: r.id,
+        toolUseId: '',
         label: r.description || r.name || r.type,
         type: r.type,
         background: true,
@@ -192,6 +201,7 @@ async function show($: EngineInterface): Promise<string> {
 export const register: Register = on => {
   let tick: { cancel: () => void } | undefined
   let beats = 0
+  let hasStatus = false
   // Spawns whose agentId has not come back yet, by Agent tool call.
   const pending = new Map<string, { label: string; type: string; background: boolean }>()
 
@@ -217,6 +227,16 @@ export const register: Register = on => {
         const running = list.some(a => a.status === 'running')
         // Only advance the beat (and so redraw) when someone is dancing.
         if (running || f.mode !== 'idle') await update($, frame, n => (n + 1) % 1200)
+        // The status line, which every client shows: about once a second.
+        if (beats % 4 === 0) {
+          if (running) {
+            hasStatus = true
+            $.ui.status(statusLine(list, beats / 4))
+          } else if (hasStatus) {
+            hasStatus = false
+            $.ui.status(undefined)
+          }
+        }
         // Every ~2.6s reconcile with the engine's own roster, so an agent that
         // was killed or failed without a final turn still stops dancing.
         if (running && beats % 10 === 0) {
@@ -275,6 +295,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const row: AgentRow = {
       id,
+      toolUseId: e.tool_use_id,
       label: e.description || pending.get(e.tool_use_id)?.label || e.subagentType,
       type: e.subagentType,
       background: e.background,
@@ -374,6 +395,32 @@ export const register: Register = on => {
     if (e.props.plugin !== 'agent-disco' || e.props.id !== INLINE) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     return floorTree($, Box, Text, e.viewport?.columns ?? 60)
+  })
+
+  // --- a live card under each Agent call's row in the chat ------------------
+
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    if (e.props.tool !== 'Agent') return next(e)
+    const list = await read($, agents)
+    const a = list.find(one => one.toolUseId !== '' && one.toolUseId === e.props.tool_use_id)
+    if (!a) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const f = await read($, frame)
+    const p = progress(a)
+    const tone = a.status === 'failed' ? 'error' : a.status === 'done' ? 'success' : 'claude'
+    const row = await next(e)
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1}>
+        {row}
+        <Box flexDirection="row" gap={1}>
+          <Text color={tone} mono>{dancer(a, f, 0)}</Text>
+          <Text color={tone} mono>{bar(p, 16)}</Text>
+          <Text dimColor mono>
+            {a.status === 'running' ? `~${Math.round(p * 100)}% · ${a.tools} tools · ${a.lastTool}` : a.status}
+          </Text>
+        </Box>
+      </Box>
+    )
   })
 
   // --- the main chat's Claude, above the prompt ------------------------------

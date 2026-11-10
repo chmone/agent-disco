@@ -1,5 +1,6 @@
 export type AgentRow = {
   id: string
+  toolUseId: string
   label: string
   type: string
   background: boolean
