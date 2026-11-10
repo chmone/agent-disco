@@ -1,0 +1,11 @@
+{
+  "name": "agent-disco",
+  "owner": { "name": "chmone" },
+  "plugins": [
+    {
+      "name": "agent-disco",
+      "source": "./",
+      "description": "Background agents in a sidebar with progress bars and dancing Claudes; the main chat's Claude points at the agent it is working on, or dances off to the side on a new thought."
+    }
+  ]
+}
