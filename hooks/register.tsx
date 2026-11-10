@@ -202,6 +202,8 @@ export const register: Register = on => {
   let tick: { cancel: () => void } | undefined
   let beats = 0
   let hasStatus = false
+  // When the band above the prompt last drew (the terminal and desktop draw it).
+  let bandAt = 0
   // Spawns whose agentId has not come back yet, by Agent tool call.
   const pending = new Map<string, { label: string; type: string; background: boolean }>()
 
@@ -229,7 +231,10 @@ export const register: Register = on => {
         if (running || f.mode !== 'idle') await update($, frame, n => (n + 1) % 1200)
         // The status line, which every client shows: about once a second.
         if (beats % 4 === 0) {
-          if (running) {
+          // Only where nothing richer is on screen: the terminal draws the
+          // band above the prompt and the pane, so a status line would repeat them.
+          const shown = (await $.clock.now()) - bandAt < 3000 || (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)
+          if (running && !shown) {
             hasStatus = true
             $.ui.status(statusLine(list, beats / 4))
           } else if (hasStatus) {
@@ -432,6 +437,7 @@ export const register: Register = on => {
     const running = list.filter(a => a.status === 'running')
     if (running.length === 0 && fx.mode !== 'pointing') return next(e)
 
+    bandAt = await $.clock.now()
     const { Box, Text } = $.ui.resolve(e)
     const f = await read($, frame)
     const target = fx.mode === 'pointing' ? list.find(a => a.id === fx.target) : undefined
